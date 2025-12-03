@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secure-pod
+  namespace: rbac-demo
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 101  # nginx-unprivileged uses uid 101
+    fsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: nginx
+    image: nginxinc/nginx-unprivileged:1.25-alpine
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: false
+    ports:
+    - containerPort: 8080  # nginx-unprivileged uses port 8080 (not 80)
