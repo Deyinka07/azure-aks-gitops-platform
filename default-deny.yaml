@@ -1,0 +1,10 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: rbac-demo
+spec:
+  podSelector: {}  # Empty = applies to ALL pods
+  policyTypes:
+  - Ingress
+  - Egress
