@@ -8,3 +8,4 @@ LABEL version="custom-1.0"
 
 # App runs on port 80
 EXPOSE 80
+
