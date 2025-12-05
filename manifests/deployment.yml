@@ -1,0 +1,19 @@
+apiVersion : apps/v1
+kind: Deployment
+metadata:
+  name: deyinkaazureaksgitopsplatform 
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deyinkaazureaksgitopsplatform
+  template:
+    metadata:
+      labels:
+        app: deyinkaazureaksgitopsplatform 
+    spec:
+      containers:
+        - name: deyinkaazureaksgitopsplatform 
+          image: deyinkaacr.azurecr.io/deyinkaazureaksgitopsplatform
+          ports:
+          - containerPort: 80
