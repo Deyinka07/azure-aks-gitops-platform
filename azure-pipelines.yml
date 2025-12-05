@@ -45,20 +45,3 @@ stages:
               echo "📦 Registry: $(containerRegistry)"
               echo "🏷️  Image: $(imageRepository):$(tag)"
             displayName: 'Build Report'
-```
-
----
-
-## What This Does (Same as GitHub Actions!)
-```
-Trigger:
-├── On push to main branch
-└── Only when audiobookshelf-custom/* changes (path filter!)
-
-Build Stage:
-├── Build Docker image from audiobookshelf-custom/Dockerfile
-├── Push to deyinkaacr.azurecr.io
-├── Tag with Build ID + latest
-└── Print summary
-
-Result: Image in ACR ready to deploy!
