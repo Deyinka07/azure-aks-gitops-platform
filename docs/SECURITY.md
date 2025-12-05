@@ -1,41 +1,27 @@
 # Security Implementation
 
-Defense-in-depth security architecture with RBAC, Pod Security Standards, and Network Policies.
+Defense-in-depth approach with four layers: RBAC, Pod Security Standards, Network Policies, and vulnerability scanning.
 
 ## Security Layers
 ```
-Layer 1: RBAC (WHO can do WHAT)
-  ├── ServiceAccounts (identity)
-  ├── Roles (permissions)
-  └── RoleBindings (connection)
-  
-Layer 2: Pod Security Standards (WHAT pods can DO)
-  ├── Baseline enforcement
-  ├── Block privileged containers
-  └── Require non-root users
-  
-Layer 3: Network Policies (WHAT pods can TALK TO)
-  ├── Default deny all
-  ├── Explicit allows
-  └── Micro-segmentation
+Layer 1: RBAC           → WHO can do WHAT
+Layer 2: Pod Security   → WHAT pods can DO
+Layer 3: Network Policy → WHAT can TALK to WHAT
+Layer 4: Scanning       → WHAT's IN the images
 ```
-
-**Defense in depth**: Multiple security controls working together. If one layer is bypassed, others provide protection.
 
 ## Layer 1: RBAC
 
-### Implemented Roles
+Four roles implemented:
 
-| Role | Scope | Can Do | Cannot Do |
-|------|-------|--------|-----------|
-| **readonly-user** | Namespace | Read pods/logs/deployments | Create, delete anything |
-| **developer** | Namespace | Deploy apps, delete pods | Delete deployments/services |
-| **namespace-admin** | Namespace | Everything in namespace | Access other namespaces |
-| **cluster-viewer** | Cluster-wide | Read all pods/deployments | Modify anything |
+| Role | Scope | Permissions |
+|------|-------|-------------|
+| readonly-user | Namespace | View pods and logs |
+| developer | Namespace | Deploy apps, delete pods (not deployments) |
+| namespace-admin | Namespace | Full control within namespace |
+| cluster-viewer | Cluster | Read-only across all namespaces |
 
-### Role Examples
-
-**readonly-user** (observers, juniors):
+Example readonly role:
 ```yaml
 rules:
 - apiGroups: [""]
@@ -43,45 +29,18 @@ rules:
   verbs: ["get", "list"]
 ```
 
-**developer** (active developers):
-```yaml
-rules:
-- apiGroups: ["apps"]
-  resources: ["deployments"]
-  verbs: ["get", "list", "create", "update", "patch"]
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list", "delete"]  # Can delete pods for testing
-```
-
-**Rationale**: Developers can deploy and test, but can't accidentally delete production services.
-
-### Testing RBAC
+Test it:
 ```bash
-# Test as readonly-user (should succeed)
+# Should work
 kubectl get pods -n rbac-demo --as=system:serviceaccount:rbac-demo:readonly-user
 
-# Try to delete (should fail)
+# Should fail
 kubectl delete pod test -n rbac-demo --as=system:serviceaccount:rbac-demo:readonly-user
-# Expected: Error (Forbidden)
 ```
-
-### RBAC Best Practices
-
-- ✅ Principle of least privilege
-- ✅ Service account per application
-- ✅ Regular permission audits
-- ❌ Avoid wildcards in production (`verbs: ["*"]`)
 
 ## Layer 2: Pod Security Standards
 
-### Configuration
-
-**Enforcement level**: Baseline (blocks dangerous practices)  
-**Audit level**: Restricted (logs violations)  
-**Warn level**: Restricted (shows warnings)
-
-**Applied via namespace labels**:
+Applied via namespace labels:
 ```bash
 kubectl label namespace rbac-demo \
   pod-security.kubernetes.io/enforce=baseline \
@@ -89,20 +48,11 @@ kubectl label namespace rbac-demo \
   pod-security.kubernetes.io/warn=restricted
 ```
 
-### Security Levels
+**Baseline** (enforced): No privileged containers, no host network, no hostPath volumes.
 
-**Baseline** (enforced):
-- ❌ No privileged containers
-- ❌ No host network/ports
-- ❌ No hostPath volumes
-- ❌ Limited capabilities
+**Restricted** (audit/warn): Must run as non-root, drop all capabilities, use seccomp.
 
-**Restricted** (audit/warn only):
-- Must run as non-root
-- Must drop ALL capabilities
-- Must use seccomp profile
-
-### Secure Pod Example
+Secure pod example:
 ```yaml
 apiVersion: v1
 kind: Pod
@@ -123,33 +73,121 @@ spec:
         drop: [ALL]
 ```
 
-### Container Security Challenge
+### The nginx problem
 
-**Technical constraint**: Standard nginx requires root privileges
-
-**Error encountered**:
+Standard `nginx` image requires root and fails with PSS:
 ```
 mkdir() "/var/cache/nginx/client_temp" failed (13: Permission denied)
 ```
 
-**Resolution**: Use security-hardened images
-- `nginxinc/nginx-unprivileged` instead of `nginx`
-- `bitnami/mysql` instead of `mysql`
+Solution: Use `nginxinc/nginx-unprivileged` instead. Many popular images aren't secure by default.
 
-**Lesson**: Many popular images aren't secure by default
+## Layer 3: Network Policies
 
-### Testing Pod Security
-
-**Insecure pod** (should be blocked):
-```bash
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Pod
+Default deny all traffic:
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: bad-pod
+  name: default-deny-all
+  namespace: rbac-demo
 spec:
-  containers:
-  - name: nginx
-    image: nginx
-    securityContext:
-      privileged: true
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+```
+
+Then allow specific traffic:
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nginx-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: nginx
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 80
+```
+
+**Current limitation**: Cluster was created with `networkPolicy: none`. Policies are defined but not enforced. Would need cluster recreation to enable.
+
+## Layer 4: Vulnerability Scanning
+
+Trivy integrated into GitHub Actions pipeline.
+
+Pipeline behavior:
+1. Build image
+2. Scan with Trivy
+3. CRITICAL vulnerabilities → pipeline fails, no deployment
+4. HIGH/MEDIUM/LOW → pipeline continues, results uploaded
+
+Current scan results for audiobookshelf-custom:
+- CRITICAL: 0 (would block deployment)
+- HIGH: 5 (tracked for remediation)
+- MEDIUM: 23
+- LOW: 11
+
+Pipeline config:
+```yaml
+- name: Run Trivy vulnerability scanner
+  uses: aquasecurity/trivy-action@master
+  with:
+    image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+    format: 'sarif'
+    output: 'trivy-results.sarif'
+    severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+    exit-code: '1'  # Fail on findings
+```
+
+Run locally:
+```bash
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  aquasec/trivy image ghcr.io/deyinka07/azure-aks-gitops-platform/audiobookshelf-custom:latest
+```
+
+### Remediation SLAs
+
+| Severity | Timeline | Action |
+|----------|----------|--------|
+| CRITICAL | Immediate | Block deployment until fixed |
+| HIGH | 7 days | Prioritize in current sprint |
+| MEDIUM | 30 days | Plan for upcoming release |
+| LOW | Best effort | Fix when convenient |
+
+## How the Layers Work Together
+
+Scenario: Attacker exploits application vulnerability and gets RCE.
+
+1. **Scanning** should have caught known CVEs before deployment
+2. **Pod Security** limits damage — container runs as non-root, no privilege escalation
+3. **Network Policies** prevent lateral movement to other pods
+4. **RBAC** blocks API access — container has no cluster permissions
+
+Result: Blast radius limited to single container.
+
+## Current Status
+
+| Control | Status |
+|---------|--------|
+| RBAC | Implemented |
+| Pod Security Standards | Enforced (Baseline) |
+| Network Policies | Defined, not enforced |
+| Vulnerability Scanning | Implemented in CI/CD |
+| Secrets Management | SOPS + AGE |
+| Audit Logging | Azure Monitor |
+
+## Future Work
+
+- Enable network policy engine (requires cluster recreation)
+- Azure Key Vault integration
+- Runtime security monitoring (Falco)
+- OPA/Gatekeeper policy enforcement

@@ -1,59 +1,100 @@
-# Observability Implementation
+# Observability
 
-Azure Monitor and Log Analytics configuration for comprehensive cluster monitoring and alerting.
+Monitoring stack combining Azure Monitor (cloud-native) and Prometheus/Grafana (Kubernetes-native).
 
 ## Architecture
 ```
 AKS Cluster
-  ├── ama-logs DaemonSet (collects logs + metrics)
-  ↓
-Log Analytics Workspace
-  ├── ContainerLog (application logs)
-  ├── Perf (performance metrics)
-  ├── KubePodInventory (pod metadata)
-  └── KubeNodeInventory (node information)
-  ↓
-Azure Monitor Alerts
-  └── Scheduled query rules + action groups
+├── ama-logs DaemonSet → Log Analytics Workspace
+└── Prometheus Stack (monitoring namespace)
+    ├── Prometheus (metrics)
+    ├── Grafana (dashboards)
+    ├── Alertmanager
+    ├── Node Exporter (per node)
+    └── kube-state-metrics
 ```
 
-## Container Insights
+## Why Both?
 
-**Configuration**: Enabled during Terraform provisioning
+**Azure Monitor**: Native Azure integration, long-term retention, KQL queries, cost tracking. Less flexible for custom dashboards.
 
-**Data collected**:
-- CPU/memory usage (node and container)
-- Disk I/O and network traffic
-- Pod/container counts
-- Restart counts
-- Container logs (stdout/stderr)
+**Prometheus + Grafana**: Kubernetes-native metrics, highly customizable dashboards, open-source. Requires cluster resources, shorter retention.
 
-**Verification**:
+We use both — Azure Monitor for the cloud-wide view, Prometheus for application-specific metrics.
+
+## Prometheus Stack
+
+Deployed via Helm:
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm install prometheus prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --create-namespace \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set grafana.adminPassword=admin123
+```
+
+Resource usage: ~500-700MB memory, ~0.3-0.5 CPU cores
+
+Verify it's running:
+```bash
+kubectl get pods -n monitoring
+```
+
+## Grafana Access
+
+Port-forward for local access:
+```bash
+kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
+```
+
+Open http://localhost:3000. Login: `admin` / `admin123`
+
+For production, set up proper ingress with TLS and SSO.
+
+### Dashboard: Kubernetes Pod Metrics (ID: 15760)
+
+Import via: Dashboards → Import → Enter `15760` → Select Prometheus data source
+
+Shows CPU/memory by container, network bandwidth, pod restarts, Kubernetes events.
+
+## Prometheus Queries
+
+Common queries:
+```promql
+# CPU usage by pod
+sum(rate(container_cpu_usage_seconds_total{namespace="audiobookshelf"}[5m])) by (pod)
+
+# Memory usage percentage
+100 * container_memory_working_set_bytes{namespace="audiobookshelf"} 
+/ container_spec_memory_limit_bytes{namespace="audiobookshelf"}
+
+# Pod restart count
+sum(kube_pod_container_status_restarts_total{namespace="audiobookshelf"}) by (pod)
+
+# Network receive rate
+rate(container_network_receive_bytes_total{namespace="audiobookshelf"}[5m])
+```
+
+## Azure Monitor (Container Insights)
+
+Enabled via Terraform. Collects CPU, memory, disk, network, and container logs.
+
+Verify the agent is running:
 ```bash
 kubectl get pods -n kube-system -l app=ama-logs
-# Should show ama-logs pods running
 ```
 
-## KQL Query Language
+### KQL Queries
 
-**Core tables**:
-
-| Table | Contents |
-|-------|----------|
-| ContainerLog | stdout/stderr logs |
-| Perf | CPU, memory, disk, network |
-| KubePodInventory | Pod metadata |
-| KubeNodeInventory | Node information |
-
-**Schema discovery** (critical first step):
+Always check schema first:
 ```kusto
 ContainerLog | take 1
 ```
-Always check schema before writing queries to avoid column name errors.
 
-## Production Queries
-
-### Recent Application Logs
+Recent logs:
 ```kusto
 ContainerLog
 | where TimeGenerated > ago(1h)
@@ -62,7 +103,7 @@ ContainerLog
 | take 50
 ```
 
-### Error Detection
+Find errors:
 ```kusto
 ContainerLog
 | where TimeGenerated > ago(24h)
@@ -71,17 +112,7 @@ ContainerLog
 | order by TimeGenerated desc
 ```
 
-### CPU Usage Analysis
-```kusto
-Perf
-| where TimeGenerated > ago(1h)
-| where ObjectName == "K8SContainer"
-| where CounterName == "cpuUsageNanoCores"
-| summarize AvgCPU = avg(CounterValue) by InstanceName
-| order by AvgCPU desc
-```
-
-### Pod Restart Monitoring (Alert Query)
+Pod restart alert query:
 ```kusto
 KubePodInventory
 | where TimeGenerated > ago(15m)
@@ -89,11 +120,11 @@ KubePodInventory
 | where MaxRestarts > 3
 ```
 
-## Alerting Configuration
+## Alerting
 
-### Action Group
+### Azure Monitor Alert
 
-**Created via CLI**:
+We set up an action group for email notifications:
 ```bash
 az monitor action-group create \
   --name "aks-alerts-email" \
@@ -103,22 +134,10 @@ az monitor action-group create \
 az monitor action-group update \
   --name "aks-alerts-email" \
   --resource-group "rg-aks-gitops-demo" \
-  --add-action email admin deyinka007@hotmail.com
+  --add-action email admin your@email.com
 ```
 
-**Configuration**:
-- Name: aks-alerts-email
-- Type: Email notification
-- Recipient: deyinka007@hotmail.com
-
-### Scheduled Query Alert
-
-**Alert**: Pod restart detection  
-**Condition**: Pods restarting >3 times in 15 minutes  
-**Evaluation**: Every 15 minutes  
-**Severity**: Warning (level 2)
-
-**CLI creation**:
+Scheduled query alert for pod restarts:
 ```bash
 az monitor scheduled-query create \
   --name "aks-pod-restart-alert" \
@@ -131,110 +150,43 @@ az monitor scheduled-query create \
   --action-groups "/subscriptions/SUB_ID/resourceGroups/rg-aks-gitops-demo/providers/microsoft.insights/actionGroups/aks-alerts-email"
 ```
 
-**Key syntax**: `--condition "count 'q' > 0"` references query variable `q`
+### Prometheus Alerting
 
-## CLI Automation
-
-**Query execution**:
-```bash
-az monitor log-analytics query \
-  --workspace "WORKSPACE_ID" \
-  --analytics-query "ContainerLog | take 10" \
-  --output table
+Alertmanager is included in the stack. Example custom alert:
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: audiobookshelf-alerts
+  namespace: monitoring
+spec:
+  groups:
+  - name: audiobookshelf
+    interval: 30s
+    rules:
+    - alert: HighMemoryUsage
+      expr: |
+        (container_memory_working_set_bytes{namespace="audiobookshelf"} 
+        / container_spec_memory_limit_bytes{namespace="audiobookshelf"}) > 0.9
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High memory usage in audiobookshelf"
 ```
-
-**Output management techniques**:
-- Limit results: `| take 10`
-- Truncate columns: `substring(LogEntry, 0, 100)`
-- Pipe to less: `| less -S`
-- Save to file: `--output json > results.json`
-- Aggregate: `| summarize count()`
-
-## Container Insights Dashboard
-
-**Access**: Azure Portal → Monitor → Containers → Select cluster
-
-**Views**:
-- **Cluster**: Overall health, node status, pod counts
-- **Nodes**: Per-node metrics, CPU/memory
-- **Controllers**: Deployment/ReplicaSet health
-- **Containers**: Individual container metrics
-
-## Query Techniques
-
-**Time filtering**:
-```kusto
-where TimeGenerated > ago(1h)      // Last hour
-where TimeGenerated > ago(24h)     // Last day
-```
-
-**Aggregation**:
-```kusto
-| summarize count() by Computer
-| summarize avg(Value) by Resource
-| summarize max(RestartCount)
-```
-
-**Filtering**:
-```kusto
-| where LogEntry contains "error"
-| where Value > 1000
-```
-
-**Projection**:
-```kusto
-| project TimeGenerated, Message    // Select columns
-| order by TimeGenerated desc       // Sort
-| take 50                            // Limit results
-```
-
-## Monitoring Best Practices
-
-**Query optimization**:
-- ✅ Filter early with `where` clauses
-- ✅ Check schema before writing
-- ✅ Use `take` during development
-- ✅ Aggregate when possible
-
-**Alert configuration**:
-- Set realistic thresholds
-- Use appropriate severity levels
-- Test before production
-- Prevent alert fatigue
-
-**Cost management**:
-- First 5 GB/month free
-- Configure appropriate retention (30 days)
-- Filter unnecessary logs
-- Archive old logs to storage
 
 ## Troubleshooting
 
-**No data in Container Insights**:
-```bash
-kubectl get pods -n kube-system | grep ama-logs
-# Verify ama-logs pods are running
-```
+**No data in Container Insights**: Check if ama-logs pods are running in kube-system.
 
-**KQL query errors**:
-- Check schema: `TableName | take 1`
-- Verify column names match exactly
+**KQL query errors**: Verify column names with `TableName | take 1`.
 
-**Alert not triggering**:
-- Test query returns results
-- Verify action group configuration
-- Check alert is enabled
+**Grafana not loading**: Check pod status with `kubectl get pods -n monitoring | grep grafana`.
 
-## Production Monitoring Strategy
+**No metrics in Grafana**: Verify Prometheus data source is configured. Check targets at http://localhost:9090/targets (after port-forward).
 
-**Metrics to monitor**:
-- Node CPU/memory (capacity planning)
-- Pod restart patterns (stability)
-- Container exit codes (failures)
-- Application error rates
+## Cost Notes
 
-**Alert hierarchy**:
-- **Critical**: Cluster unreachable, multiple node failures
-- **Warning**: Pod restarts, resource saturation
-- **Info**: Configuration changes, deployments
-
+- Azure Monitor: First 5 GB/month free, then ~$2.50/GB
+- Prometheus: Self-hosted, uses ~0.5GB memory
+- Default retention: 30 days (Azure), 15 days (Prometheus)

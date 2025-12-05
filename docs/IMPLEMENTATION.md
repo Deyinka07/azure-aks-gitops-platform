@@ -1,125 +1,147 @@
 # Technical Implementation Guide
 
-Azure AKS GitOps Platform - Complete technical reference covering infrastructure, GitOps, observability, and security.
+Full technical reference for the Azure AKS GitOps platform.
 
-## Architecture Overview
+## Architecture
 ```
 Azure Cloud
-  ├── AKS Cluster (Terraform)
-  │   ├── FluxCD (GitOps automation)
-  │   ├── Applications (nginx-ingress, audiobookshelf, cloudflared)
-  │   └── Security (RBAC, Pod Security, Network Policies)
-  └── Azure Monitor + Log Analytics
+├── AKS Cluster (Terraform-managed)
+│   ├── FluxCD (GitOps)
+│   ├── Apps: nginx-ingress, audiobookshelf, cloudflared
+│   ├── Monitoring: Prometheus + Grafana
+│   └── Security: RBAC, Pod Security, Network Policies
+├── Azure Monitor + Log Analytics
+├── Azure Container Registry (deyinkaacr.azurecr.io)
+└── GitHub Container Registry (ghcr.io)
 ```
 
 ## Implementation Phases
 
-### Phase 1: Infrastructure (Terraform + AKS)
-- Terraform-managed AKS cluster
-- Log Analytics workspace integration
-- Container Insights enabled
-- Cost-optimized resource sizing
+### Phase 1: Infrastructure
 
-**Key files**: `infrastructure/main.tf`, `variables.tf`, `outputs.tf`
+Terraform-managed AKS cluster with Log Analytics and Container Insights enabled.
 
-### Phase 2: GitOps (FluxCD)
-- FluxCD bootstrap with GitHub integration
-- SOPS-encrypted secrets (AGE encryption)
-- Automated reconciliation (5-minute sync)
-- Self-healing infrastructure
+Key files: `terraform/main.tf`, `variables.tf`, `outputs.tf`
 
-**Applications deployed**: nginx-ingress, audiobookshelf, cloudflared
+### Phase 2: GitOps
 
-### Phase 3: Observability (Azure Monitor)
-- Container Insights for metrics
-- KQL queries for log analysis
-- Scheduled query alerts
-- Email notifications via action groups
+FluxCD bootstrapped with GitHub integration. Secrets encrypted with SOPS/AGE. Reconciliation runs every 5 minutes.
 
-**Sample KQL**: Pod restart monitoring, error detection, CPU analysis
+Deployed apps: nginx-ingress, audiobookshelf, cloudflared
 
-### Phase 4: Security (Defense in Depth)
-- **RBAC**: 4 role types (readonly, developer, namespace-admin, cluster-viewer)
-- **Pod Security Standards**: Baseline enforcement on namespaces
-- **Network Policies**: Default deny with explicit allows (requires network policy engine)
+### Phase 3: Observability
 
-## Technology Stack
+Dual monitoring approach:
+- Azure Monitor for cloud-native integration and long-term retention
+- Prometheus + Grafana for Kubernetes-native metrics and custom dashboards
+
+See [OBSERVABILITY.md](OBSERVABILITY.md) for details.
+
+### Phase 4: Security
+
+Defense in depth with four layers:
+- RBAC (4 role types)
+- Pod Security Standards (Baseline enforcement)
+- Network Policies (defined, pending enforcement)
+- Vulnerability scanning (Trivy in CI/CD)
+
+See [SECURITY.md](SECURITY.md) for details.
+
+### Phase 5: CI/CD Pipelines
+
+#### GitHub Actions
+
+Pipeline in `.github/workflows/docker-build.yml`:
+- Triggers on push to `main` when `audiobookshelf-custom/*` changes
+- Builds Docker image
+- Runs Trivy security scan (fails on CRITICAL)
+- Pushes to ghcr.io with SHA-based tags
+
+Images published to:
+```
+ghcr.io/deyinka07/azure-aks-gitops-platform/audiobookshelf-custom:main-<SHA>
+```
+
+Current scan results: 39 vulnerabilities (0 critical, 5 high, 34 medium/low)
+
+#### Azure DevOps
+
+Alternative pipeline in `azure-pipelines.yml`:
+- Org: `deyinka007`
+- Project: `audiobookshelf-pipeline`
+- Registry: `deyinkaacr.azurecr.io`
+- Status: Configured, awaiting Microsoft parallelism approval
+
+## Tech Stack
 
 | Component | Technology |
-|-----------|-----------|
+|-----------|------------|
 | Infrastructure | Terraform |
 | Orchestration | Azure AKS |
 | GitOps | FluxCD |
 | Secrets | SOPS + AGE |
+| CI/CD | GitHub Actions, Azure DevOps |
+| Registries | ghcr.io, Azure Container Registry |
+| Security Scanning | Trivy |
 | Ingress | nginx-ingress |
-| Access | Cloudflare Tunnels |
-| Monitoring | Azure Monitor + KQL |
-| Security | RBAC, PSS, Network Policies |
+| Tunnel Access | Cloudflare Tunnels |
+| Monitoring | Azure Monitor, Prometheus, Grafana |
 
-## Key Design Decisions
+## Design Decisions
 
-**FluxCD over ArgoCD**: Native Kubernetes CRDs, better SOPS integration, pull-based model
+**FluxCD over ArgoCD** — Native Kubernetes CRDs, better SOPS integration, pull-based model.
 
-**SOPS for Secrets**: Encrypted secrets in Git, seamless FluxCD integration, no external dependencies
+**SOPS for secrets** — Encrypted secrets live in Git, no external dependencies.
 
-**Azure Monitor over Prometheus**: Native Azure integration, no infrastructure overhead, KQL query power
+**Dual monitoring** — Prometheus for detailed metrics, Azure Monitor for cloud-native integration.
 
-**nginx-ingress over Traefik**: Industry standard, extensive documentation, enterprise adoption
+**Multi-registry CI/CD** — GitHub Actions for dev velocity, Azure DevOps for enterprise integration.
 
-## Technical Constraints
+## Lessons Learned
 
-### Container Security Hardening
-**Issue**: Standard nginx requires root privileges  
-**Solution**: Used nginxinc/nginx-unprivileged variant  
-**Lesson**: Popular images often aren't secure by default
+**Container security hardening**: Standard nginx requires root. Use `nginxinc/nginx-unprivileged` instead.
 
-### Network Policy Enforcement
-**Issue**: Cluster created with `networkPolicy: none`  
-**Solution**: Policies defined but not enforced (requires cluster recreation)  
-**Lesson**: Network policies must be planned during initial provisioning
+**Network policy enforcement**: Must be enabled at cluster creation. Our cluster was created with `networkPolicy: none`, so policies are defined but not enforced.
 
-### KQL Schema Discovery
-**Issue**: Queries failed due to incorrect column assumptions  
-**Solution**: Always check schema with `TableName | take 1` first  
-**Lesson**: Verify schema before writing queries
+**KQL schema discovery**: Always run `TableName | take 1` before writing queries. Column names aren't what you expect.
+
+**Azure DevOps parallelism**: New orgs need manual approval for free parallel jobs. Plan for 2-3 business day delay.
 
 ## Operational Commands
 ```bash
-# Start/stop cluster
+# Cluster start/stop
 az aks start --name aks-gitops-cluster --resource-group rg-aks-gitops-demo
 az aks stop --name aks-gitops-cluster --resource-group rg-aks-gitops-demo
 
-# Query logs
-az monitor log-analytics query --workspace "ID" --analytics-query "KQL"
-
-# Flux status
+# FluxCD
 flux get all
 flux reconcile kustomization flux-system --with-source
 
-# Test RBAC
-kubectl get pods -n rbac-demo --as=system:serviceaccount:rbac-demo:readonly-user
+# Monitoring
+kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
+
+# Trigger pipeline manually
+git commit --allow-empty -m "Trigger pipeline"
+git push origin main
+
+# Local Trivy scan
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  aquasec/trivy image ghcr.io/deyinka07/azure-aks-gitops-platform/audiobookshelf-custom:latest
 ```
 
-## Cost Management
+## Costs
 
-- **Running**: ~£1.70/day
-- **Stopped**: ~£0.30/day  
-- **Total 4 weeks**: ~£50-60
+- Running: ~£1.70/day
+- Stopped: ~£0.30/day
+- Monthly estimate: £50-60
+- ACR (Basic): ~£5-10/month
 
-**Optimization**: Use `az aks stop` when not in use, delete completely for extended periods
+Use `az aks stop` when not actively working.
 
-## Future Enhancements
+## Project Timeline
 
-- CI/CD pipeline (GitHub Actions)
-- Network policy engine enablement
-- Azure Key Vault integration
-- Horizontal Pod Autoscaling
-- Cost optimization dashboards
+- Weeks 1-2: Infrastructure + GitOps (Terraform, AKS, FluxCD)
+- Weeks 3-4: Security + Observability (RBAC, PSS, Azure Monitor)
+- Weeks 5-6: CI/CD + Advanced Monitoring (GitHub Actions, Prometheus/Grafana)
 
-## Documentation
-
-- [Infrastructure Details](INFRASTRUCTURE.md)
-- [GitOps Configuration](GITOPS.md)
-- [Monitoring Setup](OBSERVABILITY.md)
-- [Security Implementation](SECURITY.md)
-
+Total: ~6 weeks, ~100+ hours
