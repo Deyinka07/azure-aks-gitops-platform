@@ -1,0 +1,64 @@
+# Azure Pipeline for audiobookshelf-custom
+# Build and push to Azure Container Registry
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - audiobookshelf-custom/*
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Container registry connection (keep this - it's correct!)
+  dockerRegistryServiceConnection: 'db1f1afb-9b28-41fc-8c1f-64d008c51a85'
+  
+  # Fixed values
+  imageRepository: 'audiobookshelf-custom'
+  containerRegistry: 'deyinkaacr.azurecr.io'
+  dockerfilePath: 'audiobookshelf-custom/Dockerfile'
+  tag: '$(Build.BuildId)'
+
+stages:
+  - stage: Build
+    displayName: 'Build and Push'
+    jobs:
+      - job: BuildJob
+        displayName: 'Build Docker Image'
+        steps:
+          - task: Docker@2
+            displayName: 'Build and push image to ACR'
+            inputs:
+              command: 'buildAndPush'
+              repository: '$(imageRepository)'
+              dockerfile: '$(dockerfilePath)'
+              containerRegistry: '$(dockerRegistryServiceConnection)'
+              tags: |
+                $(tag)
+                latest
+          
+          - script: |
+              echo "✅ Image built and pushed successfully!"
+              echo "📦 Registry: $(containerRegistry)"
+              echo "🏷️  Image: $(imageRepository):$(tag)"
+            displayName: 'Build Report'
+```
+
+---
+
+## What This Does (Same as GitHub Actions!)
+```
+Trigger:
+├── On push to main branch
+└── Only when audiobookshelf-custom/* changes (path filter!)
+
+Build Stage:
+├── Build Docker image from audiobookshelf-custom/Dockerfile
+├── Push to deyinkaacr.azurecr.io
+├── Tag with Build ID + latest
+└── Print summary
+
+Result: Image in ACR ready to deploy!
