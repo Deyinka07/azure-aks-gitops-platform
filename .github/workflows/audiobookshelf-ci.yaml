@@ -55,6 +55,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+          - name: Test container image
+        run: echo "Image built successfully"
+
 
       - name: Run Trivy security scanner
         uses: aquasecurity/trivy-action@master
@@ -79,8 +82,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      - name: Test container image
-        run: echo "Image built successfully"
 
       - name: Report
         run: |
