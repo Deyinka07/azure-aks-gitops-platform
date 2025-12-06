@@ -307,3 +307,4 @@ Detailed documentation available in `/docs`:
 ## License
 
 MIT
+
